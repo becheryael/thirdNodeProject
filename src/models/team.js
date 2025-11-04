@@ -9,12 +9,6 @@ const teamSchema = new mongoose.Schema({
     },
 });
 
-teamSchema.virtual('soldier', {
-    ref: 'Soldier',
-    localField: '_id',
-    foreignField: 'team'
-});
-
 const Team = mongoose.model('Team', teamSchema);
 
 module.exports = Team;
