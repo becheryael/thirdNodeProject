@@ -2,27 +2,72 @@ const express = require('express');
 const router = new express.Router();
 const Soldier = require('../models/soldier');
 const Team = require('../models/team');
+const auth = require('../middleware/auth');
+const { StatusCodes } = require('http-status-codes');
 
 // Create a new soldier
-router.post('/soldier', async (req, res) => {
+router.post('', async (req, res) => {
     try {
         if (req.body.team) {
             const team = await Team.findOne({ name: req.body.team });
             if (!team) {
-                return res.status(404).send("Team doesn't exist in database. Make sure to create the team before assositing a soldier with it.");
+                return res.status(StatusCodes.BAD_REQUEST).send("Team doesn't exist in database. Make sure to create the team before associating a soldier with it.");
             }
             req.body.team = team._id;
         }
         const soldier = new Soldier(req.body);
         await soldier.save();
-        res.status(201).send(soldier);
+        res.status(StatusCodes.CREATED).send(soldier);
     } catch (error) {
-        res.status(400).send(error.message);
+        res.status(StatusCodes.INTERNAL_SERVER_ERROR).send(error.message);
     }
 });
 
+
+router.post('/login', async (req, res) => {
+    try {
+        const soldier = await Soldier.findByCredentials(req.body.personalNumber, req.body.password);
+        const token = await soldier.generateAuthToken();
+        res.send({ soldier, token });
+    } catch (error) {
+        res.status(StatusCodes.INTERNAL_SERVER_ERROR).send(error.message);
+    }
+});
+
+router.post('/logout', auth, async (req, res) => {
+    try {
+        req.soldier.tokens = req.soldier.tokens.filter((token) => {
+            return token.token !== req.token;
+        });
+        await req.soldier.save();
+
+        res.send();
+    } catch (error) {
+        res.status(StatusCodes.INTERNAL_SERVER_ERROR).send(error.message);
+    }
+});
+
+router.post('/logoutAll', auth, async (req, res) => {
+    try {
+        req.soldier.tokens = [];
+        await req.soldier.save();
+        res.send();
+    } catch (error) {
+        res.status(StatusCodes.INTERNAL_SERVER_ERROR).send(error.message);
+    }
+});
+
+router.get('/me', auth, async (req, res) => {
+    res.send(req.soldier);
+});
+
 // Update a soldier
-router.patch('/soldiers/:id', async (req, res) => {
+router.patch('/:id', auth, async (req, res) => {
+
+    if (!req.soldier.manager) {
+        return res.status(StatusCodes.FORBIDDEN).send('You must be a manager to complete this action. You are just pathetic :{')
+    }
+
     const soldierID = req.params.id;
 
     const updates = Object.keys(req.body);
@@ -30,16 +75,20 @@ router.patch('/soldiers/:id', async (req, res) => {
     const isValidOperation = updates.every((update) => allowedUpdates.includes(update));
     
     if (!isValidOperation) {
-        return res.status(400).send({error: 'invalid updates'});
+        return res.status(StatusCodes.BAD_REQUEST).send({ error: 'invalid updates' });
     }
 
     try {
         const soldier = await Soldier.findById(soldierID);
         
+        if (!soldier) {
+            return res.status(StatusCodes.NOT_FOUND).send('This soldier does not exist in database')
+        }
+
         if (req.body.team) {
             const team = await Team.findOne({ name: req.body.team });
             if (!team) {
-                return res.status(404).send("Can not assosiate a soldier with a team that does not yet exist in databse.");
+                return res.status(StatusCodes.BAD_REQUEST).send("Can not associate a soldier with a team that does not yet exist in databse.");
             }
             req.body.team = team._id;
         }
@@ -49,109 +98,161 @@ router.patch('/soldiers/:id', async (req, res) => {
         await soldier.save();
         res.send(soldier);
     } catch (error) {
-        res.status(400).send(error.message);
+        res.status(StatusCodes.INTERNAL_SERVER_ERROR).send(error.message);
     }
 });
 
 // Delete a soldier
-router.delete('/soldier/:id', async (req, res) => {
+router.delete('/:id', auth, async (req, res) => {
+    if (!req.soldier.manager) {
+        return res.status(StatusCodes.FORBIDDEN).send('You must be a manager to complete this action. You are just pathetic :{')
+    }
+
     try {
         const soldier = await Soldier.findByIdAndDelete(req.params.id);
         if (!soldier) {
-            return res.status(404).send("Soldier doesn't exist in database.");
+            return res.status(StatusCodes.NOT_FOUND).send("Soldier doesn't exist in database.");
         }
 
-        res.status(200).send(soldier);
+        res.send(soldier);
     } catch (error) {
-        res.status(500).send();
+        res.status(StatusCodes.INTERNAL_SERVER_ERROR).send(error.message);
     }
 });
 
 // Get all the soldiers
-router.get('/soldiers', async (req, res) => {
+router.get('', auth, async (req, res) => {
     try {
         const soldiers = await Soldier.find({});
         if (soldiers.length === 0) {
-            return res.status(404).send('No soldiers in database');
+            return res.status(StatusCodes.NOT_FOUND).send('No soldiers in database');
         }
         res.send(soldiers);
 
     } catch (error) {
-        res.status(500).send(error.message);
+        res.status(StatusCodes.INTERNAL_SERVER_ERROR).send(error.message);
     }
 });
 
-// Get soldier by id
-router.get('/soldier/:id', async (req, res) => {
-    const soldierID = req.params.id;
-
+//gets all soldiers name's that are not managers
+router.get('/soldiersNames', auth, async (req, res) => {
     try {
-        const soldier = await Soldier.findById(soldierID)
-        if (!soldier) {
-            return res.status(404).send("This soldier doesn't exist in database");
+        const soldiers = await Soldier.find({ manager: false }).sort({ name: 1 });
+        if (soldiers.length === 0) {
+            return res.status(StatusCodes.NOT_FOUND).send("No soldiers in database");
         }
-        res.send(soldier);
+        let soldiersNames = [];
+        for (i = 0; i < soldiers.length; i++) {
+            soldiersNames.push(soldiers[i].name);
+        }
+        res.send(soldiersNames);
 
     } catch (error) {
-        res.status(500).send(error.message);
+        res.status(StatusCodes.INTERNAL_SERVER_ERROR).send(error.message);
     }
 });
 
 // Get all the soldiers in a team
-router.get('/teamSoldiers/:team', async (req, res) => {
+router.get('/team/:teamName', auth, async (req, res) => {
     try {
-        const team = await Team.find({ name: req.params.team });
-        const soldiers = await Soldier.find({ team });
-        if (soldiers.length === 0 ) {
-            return res.send('No soldiers in this team');
+        const team = await Team.findOne({ name: req.params.teamName });
+        
+        if (!team) {
+            return res.status(StatusCodes.BAD_REQUEST).send('This team does not exist in database.')
         }
-        res.send(soldiers);
 
+        await team.populate('soldiers');
+        const soldiers = team.soldiers;
+        
+        if (soldiers.length === 0) {
+            return res.status(StatusCodes.NOT_FOUND).send('There are no soldiers in this team.');
+        }
+
+        res.send(soldiers);
     } catch (error) {
-        res.status(500).send(error.message);
+        res.status(StatusCodes.INTERNAL_SERVER_ERROR).send(error.message);
     }
 });
 
 // Get the team a soldier belongs to 
-router.get('/soldiersTeam/:soldierID', async (req, res) => {
+router.get('/:soldierID/team', auth, async (req, res) => {
     const soldierID = req.params.soldierID;
 
     try {
-        const solider = await Soldier.findById(soldierID);
-        const soldiersTeam = await Team.findById(solider.team);
-        res.send(soldiersTeam);
-    } catch (error) {
-        res.status(500).send(error.message);
-    }
-});
-
-// Get number of team members in a team
-router.get('/numOfTeamMembers/:teamName', async (req, res) => {
-        const teamName = req.params.teamName
-    try {
-        const teamID = await Team.find({name: teamName})._id;
-        const teamMemebers = await Soldier.find({team: teamID});
-        const numOfTeamMembers = teamMemebers.length;
-        res.status(200).send(`The number of members in team ${teamName} is ${numOfTeamMembers}`)
-    } catch (error) {
-        res.status(500).send();
-    }
-});
-
-// gets the team manager of a tea,
-router.get('/teamManager/:id', async (req, res) => {
-     
-    const teamID = req.params.id
-    try {
-        const teamManager = await Soldier.find({ team: teamID, manager: true });
-        if (teamManager.length === 0) {
-            return res.send("This team does not currently have a manager. Maybe you can be the new manager! :o");
+        const soldier = await Soldier.findById(soldierID);
+        
+        if (!soldier) {
+            return res.status(StatusCodes.NOT_FOUND).send("This soldier does not exist.");
         }
 
-        res.status(200).send(teamManager);
+        await soldier.populate('team');
+        res.send(soldier.team);
 
     } catch (error) {
-        res.status(500).send(error.message);
+        res.status(StatusCodes.INTERNAL_SERVER_ERROR).send(error.message);
+    }
+});
+
+
+//gets soldiers with service of less than a year
+router.get('/youngSoldiers', auth, async (req, res) => {
+    const PAGE_LIMIT = 5;
+    const todaysDate = new Date();
+    const lastYear = new Date(todaysDate);
+    lastYear.setFullYear(todaysDate.getFullYear() - 1);
+    
+    try {
+        const youngSoldiers = await Soldier.find({ draftDate: { $gte: lastYear} }).skip(parseInt(req.query.skip * PAGE_LIMIT)).limit(PAGE_LIMIT);
+        
+        if (!youngSoldiers) {
+            return res.status(StatusCodes.NOT_FOUND).send("There are no young soldiers in the database. Everyone is very very old.");
+        }
+
+        res.send(youngSoldiers);
+    } catch (error) {
+        res.status(StatusCodes.INTERNAL_SERVER_ERROR).send(error.message);
+    }
+});
+
+//gets soldiers by length of servise
+router.get('/soldiersServiceLength', auth, async (req, res) => {
+ const sortBy = req.query.sortBy;
+    
+    if (!sortBy || (
+        sortBy != '-1' &&
+        sortBy != '1')) {
+            return res.status(StatusCodes.BAD_REQUEST).send("Please provide a sorting order. Such as: -1, 1.");
+    }
+
+    try {
+        const soldiers = await Soldier.find({}).sort({ draftDate: parseInt(sortBy) });
+
+        if (!soldiers) {
+            return res.status(StatusCodes.NOT_FOUND).send("There are no soldiers in the database.");
+        }
+
+        res.send(soldiers);
+
+    } catch (error) {
+        res.status(StatusCodes.INTERNAL_SERVER_ERROR).send(error.message);
+    }
+});
+
+// Get soldier by id
+router.get('/:id', auth, async (req, res) => {
+    const soldierID = req.params.id;
+
+    try {
+        const soldier = await Soldier.findById(soldierID)
+        
+        if (!soldier) {
+            return res.status(StatusCodes.NOT_FOUND).send("This soldier doesn't exist in database");
+        }
+
+        res.send(soldier);
+
+    } catch (error) {
+        res.status(StatusCodes.INTERNAL_SERVER_ERROR).send(error.message);
     }
 });
 
